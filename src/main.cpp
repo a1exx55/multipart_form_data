@@ -19,7 +19,7 @@ class http_session : public std::enable_shared_from_this<http_session>
 {
     public:
         explicit http_session(tcp::socket&& socket, ssl::context& ssl_context)
-            : _stream(std::move(socket), ssl_context), _form_data{_stream, _buffer.data(), "", ".."}
+            : _stream(std::move(socket), ssl_context), _form_data{_stream, _buffer}
         {
             _response.keep_alive(true);
             _response.version(11);
@@ -127,7 +127,8 @@ class http_session : public std::enable_shared_from_this<http_session>
             // Reset the timeout
             beast::get_lowest_layer(_stream).expires_never();
 
-            _form_data.download(beast::bind_front_handler(
+            _form_data.download(_request_parser->get()[http::field::content_type], {}, 
+                beast::bind_front_handler(
                     &http_session::on_download_files, shared_from_this()));
         }
 

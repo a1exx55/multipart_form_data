@@ -19,7 +19,7 @@ class http_session : public std::enable_shared_from_this<http_session>
 {
     public:
         explicit http_session(tcp::socket&& socket, ssl::context& ssl_context)
-            : _stream(std::move(socket), ssl_context), _form_data{_stream, _buffer}
+            : _stream(std::move(socket), ssl_context), _form_data{std::make_shared<multipart_form_data::downloader>(_stream, _buffer)}
         {
             _response.keep_alive(true);
             _response.version(11);
@@ -81,8 +81,6 @@ class http_session : public std::enable_shared_from_this<http_session>
             _response.body().clear();
 
             // Set unlimited body to prevent "body limit exceeded" error
-            // and handle the real limit in validate_request_attributes as it has to be processed differently
-            // depending on if the request is for uploading files or not
             _request_parser->body_limit(boost::none);
 
             // Clear the buffer for each request
@@ -127,22 +125,33 @@ class http_session : public std::enable_shared_from_this<http_session>
             // Reset the timeout
             beast::get_lowest_layer(_stream).expires_never();
 
-            _form_data.download(_request_parser->get()[http::field::content_type], {}, 
+            _form_data->download(_request_parser->get()[http::field::content_type], 
+                {
+                    .on_read_file_header_handler = [](std::string_view file_name){return std::filesystem::path{".."} / file_name;}
+                }, 
                 beast::bind_front_handler(
-                    &http_session::on_download_files, shared_from_this()));
+                    &http_session::on_download_files, shared_from_this()), 
+                shared_from_this());
         }
 
         void on_download_files(beast::error_code error_code, std::vector<std::filesystem::path>&& file_paths)
         {
-            std::cerr << error_code << file_paths.back();
             if (error_code)
             {
-                return do_write_response(false);
+                _response.body() = error_code.message();
             }
+            else
+            {
+                _response.body() = "Success";
+            }
+
+            return do_write_response(false);
         }
 
         void do_write_response(bool keep_alive)
         {
+            _response.result(200);
+            _response.prepare_payload();
             // Set the timeout for next operation
             beast::get_lowest_layer(_stream).expires_after(std::chrono::seconds(30));
 
@@ -198,7 +207,7 @@ class http_session : public std::enable_shared_from_this<http_session>
         beast::flat_buffer _buffer;
         std::optional<http::request_parser<http::string_body>> _request_parser;
         http::response<http::string_body> _response;
-        multipart_form_data::downloader _form_data;
+        std::shared_ptr<multipart_form_data::downloader> _form_data;
 };
 
 class listener : public std::enable_shared_from_this<listener>

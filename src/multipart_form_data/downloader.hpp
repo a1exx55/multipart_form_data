@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include <multipart_form_data/error.hpp>
+
 namespace multipart_form_data
 {
     template<typename read_stream, typename dynamic_buffer>
@@ -33,12 +35,16 @@ namespace multipart_form_data
                 // File name is provided as the function argument.
                 // Function return value can be used to provide file path to write into.
                 // If this handler is not defined or it returns empty path then file will be written into output_directory with unique name.
+                // If this handler throw exception then the whole downloading operation is aborted 
+                // and multipart_form_data::error::operation_aborted is set in callback.
                 std::function<std::filesystem::path(std::string_view)> on_read_file_header_handler{};
                 // The function that will be invoked when each file body is entirely read and written to filesystem.
                 // Path of the output file is provided as the function argument.
+                // If this handler throw exception then the whole downloading operation is aborted 
+                // and multipart_form_data::error::operation_aborted is set in callback.
                 std::function<void(const std::filesystem::path&)> on_read_file_body_handler{};
             };
-
+        
             downloader(
                 read_stream& stream, 
                 const dynamic_buffer& buffer)
@@ -61,7 +67,7 @@ namespace multipart_form_data
                 // Check if the request is actually multipart/form-data
                 if (content_type.find("multipart/form-data") == std::string::npos)
                 {
-                    return handler(boost::asio::error::invalid_argument, std::vector<std::filesystem::path>{});
+                    return handler(error::not_multipart_form_data_request, std::vector<std::filesystem::path>{});
                 }
 
                 _settings = custom_settings;
@@ -77,7 +83,7 @@ namespace multipart_form_data
                 // Check if the request is actually multipart/form-data
                 if (content_type.find("multipart/form-data") == std::string::npos)
                 {
-                    error_code = boost::asio::error::invalid_argument;
+                    error_code = error::not_multipart_form_data_request;
                     
                     return std::vector<std::filesystem::path>{};
                 }
@@ -116,7 +122,7 @@ namespace multipart_form_data
                 // Boundary was not found in the content type
                 if (boundary_position == std::string::npos)
                 {
-                    return handler(boost::asio::error::not_found, std::vector<std::filesystem::path>{});
+                    return handler(error::invalid_structure, std::vector<std::filesystem::path>{});
                 }
 
                 // Determine the boundary for multipart/form-data content type
@@ -197,7 +203,7 @@ namespace multipart_form_data
                     // Reset the timeout
                     boost::beast::get_lowest_layer(_stream).expires_never();
                     
-                    return handler(boost::asio::error::not_found, std::move(_output_file_paths));
+                    return handler(error::invalid_structure, std::move(_output_file_paths));
                 }
 
                 // Remove the data before the actual file name
@@ -213,7 +219,7 @@ namespace multipart_form_data
                     // Reset the timeout
                     boost::beast::get_lowest_layer(_stream).expires_never();
                     
-                    return handler(boost::asio::error::not_found, std::move(_output_file_paths));
+                    return handler(error::invalid_structure, std::move(_output_file_paths));
                 }
 
                 // Get the actual file name
@@ -221,21 +227,28 @@ namespace multipart_form_data
 
                 if (_settings.on_read_file_header_handler)
                 {
-                    _file_path = _settings.on_read_file_header_handler(file_header_data);
-
+                    try
+                    {
+                        _file_path = _settings.on_read_file_header_handler(file_header_data);
+                    }
+                    catch (...)
+                    {
+                        return handler(error::operation_aborted, std::move(_output_file_paths));
+                    }
+                    
                     if (_file_path.empty())
                     {
-                        if (!generate_file_path(file_header_data))
+                        if (!generate_file_path(file_header_data, error_code))
                         {
-                            return handler(boost::asio::error::bad_descriptor, std::move(_output_file_paths));
+                            return handler(error_code, std::move(_output_file_paths));
                         }
                     }
                 }
                 else
                 {
-                    if (!generate_file_path(file_header_data))
+                    if (!generate_file_path(file_header_data, error_code))
                     {
-                        return handler(boost::asio::error::bad_descriptor, std::move(_output_file_paths));
+                        return handler(error_code, std::move(_output_file_paths));
                     }
                 }
 
@@ -248,7 +261,7 @@ namespace multipart_form_data
                     // Reset the timeout
                     boost::beast::get_lowest_layer(_stream).expires_never();
                      
-                    return handler(boost::asio::error::invalid_argument, std::move(_output_file_paths));
+                    return handler(error::invalid_file_path, std::move(_output_file_paths));
                 }
                 
                 // Store provided file path
@@ -355,7 +368,14 @@ namespace multipart_form_data
                 // Invoke handler after reading the whole file body if it is defined
                 if (_settings.on_read_file_body_handler)
                 {
-                    _settings.on_read_file_body_handler(_output_file_paths.back());
+                    try
+                    {
+                        _settings.on_read_file_body_handler(_output_file_paths.back());
+                    }
+                    catch (...)
+                    {
+                        return handler(error::operation_aborted, std::move(_output_file_paths));
+                    }
                 }
 
                 // Consume obtained bytes
@@ -410,7 +430,7 @@ namespace multipart_form_data
                 // Boundary was not found in the content type
                 if (boundary_position == std::string::npos)
                 {
-                    error_code = boost::asio::error::not_found;
+                    error_code = error::invalid_structure;
                     _output_file_paths = {};
 
                     return;
@@ -474,7 +494,7 @@ namespace multipart_form_data
                 // No closing double quote in filename
                 if (file_name_position == std::string::npos)
                 {
-                    error_code = boost::asio::error::not_found;
+                    error_code = error::invalid_structure;
 
                     return;
                 }
@@ -484,24 +504,29 @@ namespace multipart_form_data
 
                 if (_settings.on_read_file_header_handler)
                 {
-                    _file_path = _settings.on_read_file_header_handler(file_header_data);
+                    try
+                    {
+                        _file_path = _settings.on_read_file_header_handler(file_header_data);
+                    }
+                    catch (...)
+                    {
+                        error_code = error::operation_aborted;
+
+                        return;
+                    }
 
                     if (_file_path.empty())
                     {
-                        if (!generate_file_path(file_header_data))
+                        if (!generate_file_path(file_header_data, error_code))
                         {
-                            error_code = boost::asio::error::bad_descriptor;
-
                             return;
                         }
                     }
                 }
                 else
                 {
-                    if (!generate_file_path(file_header_data))
+                    if (!generate_file_path(file_header_data, error_code))
                     {
-                        error_code = boost::asio::error::bad_descriptor;
-
                         return;
                     }
                 }
@@ -512,7 +537,7 @@ namespace multipart_form_data
                 // Invalid file path was provided
                 if (!_file.is_open())
                 {
-                    error_code = boost::asio::error::invalid_argument;
+                    error_code = error::invalid_file_path;
 
                     return;
                 }
@@ -583,7 +608,16 @@ namespace multipart_form_data
                 // Invoke handler after reading the whole file body if it is defined
                 if (_settings.on_read_file_body_handler)
                 {
-                    _settings.on_read_file_body_handler(_output_file_paths.back());
+                    try
+                    {
+                        _settings.on_read_file_body_handler(_output_file_paths.back());
+                    }
+                    catch (...)
+                    {
+                        error_code = error::operation_aborted;
+                        
+                        return;
+                    }
                 }
 
                 // Consume obtained bytes
@@ -601,37 +635,30 @@ namespace multipart_form_data
                 sync_process_file_header(error_code, bytes_transferred);
             }
 
-            inline bool generate_file_path(std::string_view file_name)
+            inline bool generate_file_path(std::string_view file_name, std::error_code& error_code)
             {
                 _file_path = _settings.output_directory / file_name;
 
-                try
+                if (std::filesystem::exists(_file_path, error_code))
                 {
-                    if (std::filesystem::exists(_file_path))
-                    {
-                        std::string new_file_name = _file_path.stem().string() + "(1)";
+                    std::string new_file_name = _file_path.stem().string() + "(1)";
 
-                        size_t copy_number = 1, copy_number_start_position = new_file_name.size() - 2;
+                    size_t copy_number = 1, copy_number_start_position = new_file_name.size() - 2;
+
+                    _file_path.replace_filename(new_file_name + _file_path.extension().c_str());
+                    
+                    while (std::filesystem::exists(_file_path, error_code))
+                    {
+                        new_file_name.replace(
+                            copy_number_start_position, 
+                            new_file_name.size() - copy_number_start_position - 1,
+                            std::to_string(++copy_number));
 
                         _file_path.replace_filename(new_file_name + _file_path.extension().c_str());
-                        
-                        while (std::filesystem::exists(_file_path))
-                        {
-                            new_file_name.replace(
-                                copy_number_start_position, 
-                                new_file_name.size() - copy_number_start_position - 1,
-                                std::to_string(++copy_number));
-
-                            _file_path.replace_filename(new_file_name + _file_path.extension().c_str());
-                        }
                     }
                 }
-                catch (const std::exception&)
-                {
-                    return false;
-                }
 
-                return true;
+                return !error_code;
             }
 
             read_stream& _stream;

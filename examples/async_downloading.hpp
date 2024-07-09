@@ -77,41 +77,49 @@ class http_session : public std::enable_shared_from_this<http_session>
             // Suppress compiler warnings about unused variable bytes_transferred  
             boost::ignore_unused(bytes_transferred);
 
-            // The errors mean that client closed the connection 
-            if (error_code == http::error::end_of_stream)
+            if (error_code)
             {
                 return do_close();
             }
 
-            // The error means that the timer on the logical operation(write/read) is expired
-            if (error_code == beast::error::timeout)
-            {
-                return;
-            }
-
-            // Request has invalid header structure so it can't be processed
-            if (error_code)
-            {
-                return do_write_response(false);
-            }   
-            
             // Reset the timeout
             beast::get_lowest_layer(_stream).expires_never();
 
             _form_data.async_download(
                 _request_parser->get()[http::field::content_type], 
                 {
-                    .on_read_file_header_handler = [](std::string_view file_name){return std::filesystem::path{".."} / file_name;},
-                    .on_read_file_body_handler = [](const std::filesystem::path& file_path){std::cerr << file_path << " is downloaded!\n";}
-                }, 
+                    .on_read_file_header_handler = 
+                        [](std::string_view file_name, int& some_data, std::string& some_string)
+                        {
+                            some_data = 3; 
+                            std::cout << "header: " << some_data << "\t" << some_string << "\n";
+                            return std::filesystem::path{".."} / file_name;
+                        },
+
+                    .on_read_file_body_handler = 
+                        [](const std::filesystem::path& file_path, int& some_data, std::string& some_string)
+                        {
+                            some_string = "world";
+                            std::cout << "body: " << some_data << "\t" << some_string << "\n";
+                            std::cout << file_path << " is downloaded!\n";
+                        }
+                },
                 beast::bind_front_handler(
                     &http_session::on_download_files, 
                     shared_from_this()), 
-                shared_from_this());
+                shared_from_this(),
+                std::ref(_some_data),
+                std::string{"hello"});
         }
 
-        void on_download_files(beast::error_code error_code, std::vector<std::filesystem::path>&& file_paths)
+        void on_download_files(
+            beast::error_code error_code, 
+            std::vector<std::filesystem::path>&& file_paths, 
+            int some_data, 
+            std::string&& some_string)
         {
+            std::cout << "result: " << some_data << "\t" << some_string << "\n";
+
             if (error_code)
             {
                 _response.body() = error_code.message();
@@ -132,6 +140,7 @@ class http_session : public std::enable_shared_from_this<http_session>
         {
             _response.result(200);
             _response.prepare_payload();
+
             // Set the timeout for next operation
             beast::get_lowest_layer(_stream).expires_after(std::chrono::seconds(30));
 
@@ -149,12 +158,6 @@ class http_session : public std::enable_shared_from_this<http_session>
         {
             // Suppress compiler warnings about unused variable bytes_transferred  
             boost::ignore_unused(bytes_transferred);
-
-            // The error means that the timer on the logical operation(write/read) is expired
-            if (error_code == beast::error::timeout)
-            {
-                return;
-            }
 
             if (error_code)
             {
@@ -185,6 +188,7 @@ class http_session : public std::enable_shared_from_this<http_session>
             _stream.socket().shutdown(tcp::socket::shutdown_send, error_code);
         }
 
+        int _some_data = 5;
         beast::tcp_stream _stream;
         beast::flat_buffer _buffer{};
         std::optional<http::request_parser<http::string_body>> _request_parser;

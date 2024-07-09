@@ -20,6 +20,7 @@ void do_session(tcp::socket& socket)
 {
     beast::error_code error_code;
 
+    int some_data = 5;
     beast::flat_buffer buffer;
     std::optional<http::request_parser<http::string_body>> request_parser;
     http::response<http::string_body> response;
@@ -51,10 +52,27 @@ void do_session(tcp::socket& socket)
         std::vector<std::filesystem::path> file_paths = form_data.sync_download(
             request_parser->get()[http::field::content_type], 
             {
-                .on_read_file_header_handler = [](std::string_view file_name){return std::filesystem::path{".."} / file_name;},
-                .on_read_file_body_handler = [](const std::filesystem::path& file_path){std::cerr << file_path << " is downloaded!\n";}
+                .on_read_file_header_handler = 
+                    [](std::string_view file_name, int& some_data, std::string& some_string)
+                    {
+                        some_data = 3; 
+                        std::cout << "header: " << some_data << "\t" << some_string << "\n";
+                        return std::filesystem::path{".."} / file_name;
+                    },
+
+                .on_read_file_body_handler = 
+                    [](const std::filesystem::path& file_path, int& some_data, std::string& some_string)
+                    {
+                        some_string = "world";
+                        std::cout << "body: " << some_data << "\t" << some_string << "\n";
+                        std::cout << file_path << " is downloaded!\n";
+                    }
             },
-            error_code);
+            error_code,
+            std::ref(some_data),
+            std::string{"hello"});
+
+        std::cout << "result: " << some_data << "\n";
 
         if (error_code)
         {
